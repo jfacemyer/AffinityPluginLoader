@@ -31,12 +31,18 @@ namespace WineFix.Patches
         private static PropertyInfo _currentViewProperty;
         private static PropertyInfo _renderControlProperty; // lazily cached (needs runtime type)
         private static ConstructorInfo _colourRGBConstructor;
+        private static FieldInfo _screenBmpField;
 
         // State
         private static IntPtr _hwnd = IntPtr.Zero;
         private static bool _pickerActive = false;
         private static bool _useExactPixelColor = false;
         private static double _monitorScale = 1.0;
+        private static int _dragStartTicks;
+        private static int _recaptureIndex;
+
+        // When to take the canvas capture again, in ms after StartDragging; see UpdateWindowLocation_Prefix.
+        private static readonly int[] RecaptureAfterMs = { 50, 150, 300, 600 };
 
         private const int SRCCOPY = 0x00CC0020;
 
@@ -135,6 +141,14 @@ namespace WineFix.Patches
                     harmony.Patch(finishDragging, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(FinishDragging_Prefix)));
 
                 Logger.Info("Patched ColourPickerMagnifier StartDragging/FinishDragging");
+
+                var updateWindowLocation = magnifierType.GetMethod("UpdateWindowLocation", BindingFlags.NonPublic | BindingFlags.Instance);
+                _screenBmpField = magnifierType.GetField("_screenBmp", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (updateWindowLocation != null && _screenBmpField != null)
+                {
+                    harmony.Patch(updateWindowLocation, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(UpdateWindowLocation_Prefix)));
+                    Logger.Info("Patched ColourPickerMagnifier UpdateWindowLocation (recapture after the overlay is hidden)");
+                }
             }
 
             Logger.Info("ColorPickerWayland patch applied successfully");
@@ -146,6 +160,8 @@ namespace WineFix.Patches
         {
             _pickerActive = true;
             _hwnd = IntPtr.Zero;
+            _dragStartTicks = Environment.TickCount;
+            _recaptureIndex = 0;
 
             try
             {
@@ -192,6 +208,31 @@ namespace WineFix.Patches
         public static void FinishDragging_Prefix()
         {
             _pickerActive = false;
+        }
+
+        /// <summary>
+        /// StartDragging hides the tool overlay (selection handles, outlines) and the first tick
+        /// captures the canvas, which is then kept for the whole drag. Under Wine the canvas is
+        /// usually not yet redrawn without the overlay at that point, so the zoom preview showed
+        /// the handles while the picked color came from the document under them. Drop the capture
+        /// a few times early in the drag, so the next tick takes it again from the redrawn canvas.
+        /// </summary>
+        public static void UpdateWindowLocation_Prefix(object __instance)
+        {
+            if (!_pickerActive || _recaptureIndex >= RecaptureAfterMs.Length)
+                return;
+
+            int elapsed = Environment.TickCount - _dragStartTicks;
+            if (elapsed < RecaptureAfterMs[_recaptureIndex])
+                return;
+            while (_recaptureIndex < RecaptureAfterMs.Length && elapsed >= RecaptureAfterMs[_recaptureIndex])
+                _recaptureIndex++;
+
+            if (_screenBmpField.GetValue(__instance) is Bitmap old)
+            {
+                _screenBmpField.SetValue(__instance, null);
+                old.Dispose();
+            }
         }
 
         // ── Exact mode: override picked colour with the zoom preview center pixel ──
