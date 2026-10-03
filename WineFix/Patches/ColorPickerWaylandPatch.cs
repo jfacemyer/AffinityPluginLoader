@@ -33,6 +33,7 @@ namespace WineFix.Patches
         private static ConstructorInfo _colourRGBConstructor;
         private static FieldInfo _screenBmpField;
         private static MethodInfo _showColourPickerMethod;
+        private static MethodInfo _onFinishDraggingMethod;
 
         // State
         private static IntPtr _hwnd = IntPtr.Zero;
@@ -42,6 +43,7 @@ namespace WineFix.Patches
         private static int _dragStartTicks;
         private static int _recaptureIndex;
         private static object _pickerService;   // the UserInterfaceService showing the picker, if any
+        private static object _activeMagnifier; // the ColourPickerMagnifier between StartDragging and FinishDragging
         private static bool _appInactive;
 
         // When to take the canvas capture again, in ms after StartDragging; see UpdateWindowLocation_Prefix.
@@ -139,6 +141,8 @@ namespace WineFix.Patches
                 if (startDragging != null)
                     harmony.Patch(startDragging, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(StartDragging_Prefix)));
 
+                _onFinishDraggingMethod = magnifierType.GetMethod("OnFinishDragging", BindingFlags.Public | BindingFlags.Instance);
+
                 var finishDragging = magnifierType.GetMethod("FinishDragging", BindingFlags.Public | BindingFlags.Instance);
                 if (finishDragging != null)
                     harmony.Patch(finishDragging, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(FinishDragging_Prefix)));
@@ -172,9 +176,10 @@ namespace WineFix.Patches
 
         // ── Picker lifecycle ──
 
-        public static void StartDragging_Prefix()
+        public static void StartDragging_Prefix(object __instance)
         {
             _pickerActive = true;
+            _activeMagnifier = __instance;
             _hwnd = IntPtr.Zero;
             _dragStartTicks = Environment.TickCount;
             _recaptureIndex = 0;
@@ -224,17 +229,21 @@ namespace WineFix.Patches
         public static void FinishDragging_Prefix()
         {
             _pickerActive = false;
+            _activeMagnifier = null;
         }
 
         // ── Ending the pick when Affinity loses focus ──
 
         /// <summary>
         /// The magnifier is a topmost window, and under Wine switching to another application
-        /// does not end the pick, so it stayed above that application's windows. The tool ends
-        /// a pick by calling ShowColourPicker(false); do the same, as a canceled pick, when
-        /// Affinity is deactivated. While Affinity is inactive the tool still sees the mouse over
-        /// the canvas and would show the magnifier again, so requests to show it are ignored
-        /// until Affinity is active again; the tool shows a new one when it is next used.
+        /// does not end the pick, so it stayed above that application's windows. End it as a
+        /// canceled pick when Affinity is deactivated. The tool ends a pick by calling
+        /// ShowColourPicker(false); do the same. While Affinity is inactive the tool still sees the
+        /// mouse over the canvas and would show the magnifier again, so requests to show it are
+        /// ignored until Affinity is active again; the tool shows a new one when it is next used.
+        /// A drag from a picker button (the Colors panel) ends on mouse up or lost capture, and
+        /// both happen elsewhere; end it through the magnifier's OnFinishDragging, which tells the
+        /// button to release its capture.
         /// </summary>
         public static bool ShowColourPicker_Prefix(object __instance, bool isShowing, ref bool __result)
         {
@@ -251,11 +260,15 @@ namespace WineFix.Patches
         {
             _appInactive = true;
             var service = _pickerService;
-            if (service == null)
-                return;
+            var magnifier = _activeMagnifier;
             try
             {
-                _showColourPickerMethod.Invoke(service, new object[] { false, false, false, 0, true, false });
+                if (service != null)
+                    _showColourPickerMethod.Invoke(service, new object[] { false, false, false, 0, true, false });
+                else if (magnifier != null && _onFinishDraggingMethod != null)
+                    _onFinishDraggingMethod.Invoke(magnifier, new object[] { true });
+                else
+                    return;
                 Logger.Info("Color picker ended: Affinity lost focus");
             }
             catch (Exception ex)
