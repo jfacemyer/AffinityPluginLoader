@@ -32,6 +32,7 @@ namespace WineFix.Patches
         private static PropertyInfo _renderControlProperty; // lazily cached (needs runtime type)
         private static ConstructorInfo _colourRGBConstructor;
         private static FieldInfo _screenBmpField;
+        private static FieldInfo _dragdropWindowField;
         private static MethodInfo _showColourPickerMethod;
         private static MethodInfo _onFinishDraggingMethod;
 
@@ -148,6 +149,15 @@ namespace WineFix.Patches
                     harmony.Patch(finishDragging, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(FinishDragging_Prefix)));
 
                 Logger.Info("Patched ColourPickerMagnifier StartDragging/FinishDragging");
+
+                // Stop a timer that outlives its window instead of letting it throw
+                var timerTick = magnifierType.GetMethod("timer_Tick", BindingFlags.NonPublic | BindingFlags.Instance);
+                _dragdropWindowField = magnifierType.GetField("_dragdropWindow", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (timerTick != null && _dragdropWindowField != null)
+                {
+                    harmony.Patch(timerTick, prefix: new HarmonyMethod(typeof(ColorPickerWaylandPatch), nameof(TimerTick_Prefix)));
+                    Logger.Info("Patched ColourPickerMagnifier timer_Tick (stop a timer whose window is gone)");
+                }
 
                 var updateWindowLocation = magnifierType.GetMethod("UpdateWindowLocation", BindingFlags.NonPublic | BindingFlags.Instance);
                 _screenBmpField = magnifierType.GetField("_screenBmp", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -294,6 +304,20 @@ namespace WineFix.Patches
         private static void OnApplicationActivated(object sender, EventArgs e)
         {
             _appInactive = false;
+        }
+
+        /// <summary>
+        /// timer_Tick moves the magnifier window and then reads it; once the pick has ended and the
+        /// window is gone, a tick still delivered throws a NullReferenceException that takes
+        /// Affinity down. Stop such a timer and skip the tick.
+        /// </summary>
+        public static bool TimerTick_Prefix(object __instance, object sender)
+        {
+            if (_dragdropWindowField.GetValue(__instance) != null)
+                return true;
+            (sender as System.Windows.Threading.DispatcherTimer)?.Stop();
+            Logger.Debug("Stopped a color picker timer whose window is gone");
+            return false;
         }
 
         /// <summary>
