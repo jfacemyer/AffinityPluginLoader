@@ -244,6 +244,10 @@ namespace WineFix.Patches
         /// A drag from a picker button (the Colors panel) ends on mouse up or lost capture, and
         /// both happen elsewhere; end it through the magnifier's OnFinishDragging, which tells the
         /// button to release its capture.
+        ///
+        /// The end is deferred: WM_ACTIVATEAPP is a sent message and can arrive inside the
+        /// magnifier's own timer tick (its SetWindowPos call), and ending the pick there destroys
+        /// the window the rest of that tick still uses.
         /// </summary>
         public static bool ShowColourPicker_Prefix(object __instance, bool isShowing, ref bool __result)
         {
@@ -261,11 +265,21 @@ namespace WineFix.Patches
             _appInactive = true;
             var service = _pickerService;
             var magnifier = _activeMagnifier;
+            if (service == null && magnifier == null)
+                return;
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Normal, new Action(() => EndPick(service, magnifier)));
+        }
+
+        private static void EndPick(object service, object magnifier)
+        {
+            if (!_appInactive)
+                return; // Affinity is active again
             try
             {
-                if (service != null)
+                if (service != null && service == _pickerService)
                     _showColourPickerMethod.Invoke(service, new object[] { false, false, false, 0, true, false });
-                else if (magnifier != null && _onFinishDraggingMethod != null)
+                else if (magnifier != null && magnifier == _activeMagnifier && _onFinishDraggingMethod != null)
                     _onFinishDraggingMethod.Invoke(magnifier, new object[] { true });
                 else
                     return;
