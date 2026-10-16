@@ -24,6 +24,7 @@ namespace WineFix
         public const string SettingCommandLineFileOpen = "command_line_file_open";
         public const string SettingPinPluginHost = "pin_plugin_host";
         public const string SettingContextBarItemStyle = "context_bar_item_style_fix";
+        public const string SettingSubToolColumns = "sub_tool_columns_fix";
 
         public override PluginSettingsDefinition DefineSettings()
         {
@@ -75,6 +76,10 @@ namespace WineFix
                     defaultValue: true,
                     restartRequired: true,
                     description: "Affinity 3.3 gives the text context toolbar's Leading dropdown items an empty template, so the list opens with nothing in it. Base those item styles on the standard dropdown item style instead. Does nothing once Affinity's own style has content.")
+                .AddBool(SettingSubToolColumns, "Sub-tool panel: Keep its columns across studio switches",
+                    defaultValue: true,
+                    restartRequired: true,
+                    description: "A studio switch gives the sub-tool panel the main tool pane's column count, so with a one-column tool pane the shape tools come back as one column running the height of the window until the next tool change. Put back the sub-tool panel's own rule (two columns for more than ten sub-tools) after a studio switch.")
                 .AddSection("Crash Fixes")
                 .AddBool(SettingForceSyncFontEnum, "Force synchronous font enumeration",
                     defaultValue: true,
@@ -141,6 +146,16 @@ namespace WineFix
             else
             {
                 Logger.Info("Skipping ContextBarItemStyle fix (setting: disabled)");
+            }
+
+            if (context.Settings.GetEffectiveValue<bool>(SettingSubToolColumns))
+            {
+                context.Patch("SubToolColumns fix",
+                    h => Patches.SubToolColumnsPatch.ApplyPatches(h));
+            }
+            else
+            {
+                Logger.Info("Skipping SubToolColumns fix (setting: disabled)");
             }
 
             if (context.Settings.GetEffectiveValue<bool>(SettingForceSyncFontEnum))
